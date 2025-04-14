@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>WebRTC QR Signaling</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
+  <style>
+    video, canvas { width: 300px; height: auto; }
+    #qrCanvas { display: none; }
+  </style>
+</head>
+<body>
+  <h2>WebRTC via QR Code</h2>
+  <button onclick="createOffer()">Create Offer</button>
+  <button onclick="createAnswer()">Create Answer</button>
+  <br><br>
+  <canvas id="qrCanvas"></canvas>
+  <div id="qrcode"></div>
+  <br>
+  <video id="video" autoplay playsinline></video>
+  <br>
+  <button onclick="startScan()">Scan QR</button>
+
+  <script>
+    const peer = new RTCPeerConnection();
+    const qrcodeDiv = document.getElementById('qrcode');
+    const video = document.getElementById('video');
+    const qrCanvas = document.getElementById('qrCanvas');
+    const qrCtx = qrCanvas.getContext('2d');
+
+    peer.onicecandidate = (e) => {
+      if (!e.candidate) {
+        QRCode.toCanvas(qrCanvas, JSON.stringify(peer.localDescription), error => {
+          if (error) console.error(error);
+          else qrcodeDiv.innerHTML = ''; qrcodeDiv.appendChild(qrCanvas);
+        });
+      }
+    };
+
+    peer.ondatachannel = (event) => {
+      const channel = event.channel;
+      channel.onmessage = (e) => console.log("Received:", e.data);
+      channel.onopen = () => channel.send("Hello from answer!");
+    };
+
+    async function createOffer() {
+      const channel = peer.createDataChannel("chat");
+      channel.onopen = () => channel.send("Hello from offer!");
+      channel.onmessage = (e) => console.log("Received:", e.data);
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+    }
+
+    async function createAnswer() {
+      startScan((desc) => {
+        peer.setRemoteDescription(desc).then(async () => {
+          const answer = await peer.createAnswer();
+          await peer.setLocalDescription(answer);
+        });
+      });
+    }
+
+    function startScan(callback) {
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).then(stream => {
+        video.srcObject = stream;
+        const scan = () => {
+          if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            qrCanvas.width = video.videoWidth;
+            qrCanvas.height = video.videoHeight;
+            qrCtx.drawImage(video, 0, 0, qrCanvas.width, qrCanvas.height);
+            const imageData = qrCtx.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
+            const code = jsQR(imageData.data, qrCanvas.width, qrCanvas.height);
+            if (code) {
+              stream.getTracks().forEach(track => track.stop());
+              video.srcObject = null;
+              const desc = JSON.parse(code.data);
+              callback(desc);
+              return;
+            }
+          }
+          requestAnimationFrame(scan);
+        };
+        scan();
+      });
+    }
+  </script>
+</body>
+</html>
