@@ -7,20 +7,19 @@
   <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.1/build/qrcode.min.js"></script>
   <style>
     video, canvas { width: 300px; height: auto; }
-    #qrCanvas { display: none; }
+    #qrCanvas { border: 1px solid black; }
   </style>
 </head>
 <body>
   <h2>WebRTC via QR Code</h2>
   <button onclick="createOffer()">Create Offer</button>
   <button onclick="createAnswer()">Create Answer</button>
-  <br><br>
-  <canvas id="qrCanvas"></canvas>
-  <div id="qrcode"></div>
-  <br>
-  <video id="video" autoplay playsinline></video>
-  <br>
   <button onclick="startScan()">Scan QR</button>
+  <br><br>
+
+  <div id="qrcode"></div>
+  <video id="video" autoplay playsinline></video>
+  <canvas id="qrCanvas" style="display: none;"></canvas>
 
   <script>
     const peer = new RTCPeerConnection();
@@ -29,35 +28,85 @@
     const qrCanvas = document.getElementById('qrCanvas');
     const qrCtx = qrCanvas.getContext('2d');
 
-    peer.onicecandidate = (e) => {
-      if (!e.candidate) {
-        QRCode.toCanvas(qrCanvas, JSON.stringify(peer.localDescription), error => {
-          if (error) console.error(error);
-          else qrcodeDiv.innerHTML = ''; qrcodeDiv.appendChild(qrCanvas);
-        });
-      }
-    };
+    let dataChannel;
+
+    function log(...args) {
+      console.log('[LOG]', ...args);
+    }
+
+    function waitForICEGatheringComplete(pc) {
+      return new Promise(resolve => {
+        if (pc.iceGatheringState === 'complete') {
+          resolve();
+        } else {
+          pc.addEventListener('icegatheringstatechange', function check() {
+            if (pc.iceGatheringState === 'complete') {
+              pc.removeEventListener('icegatheringstatechange', check);
+              resolve();
+            }
+          });
+        }
+      });
+    }
 
     peer.ondatachannel = (event) => {
       const channel = event.channel;
-      channel.onmessage = (e) => console.log("Received:", e.data);
-      channel.onopen = () => channel.send("Hello from answer!");
+      channel.onmessage = (e) => log("Received:", e.data);
+      channel.onopen = () => {
+        log("Data channel open from remote side.");
+        channel.send("Hello from Answer!");
+      };
     };
 
     async function createOffer() {
-      const channel = peer.createDataChannel("chat");
-      channel.onopen = () => channel.send("Hello from offer!");
-      channel.onmessage = (e) => console.log("Received:", e.data);
+      log("Creating offer...");
+      dataChannel = peer.createDataChannel("chat");
+      dataChannel.onopen = () => {
+        log("Data channel open. Sending message...");
+        dataChannel.send("Hello from Offer!");
+      };
+      dataChannel.onmessage = (e) => log("Received:", e.data);
 
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
+
+      await waitForICEGatheringComplete(peer);
+      log("ICE gathering complete for offer");
+
+      const offerStr = JSON.stringify(peer.localDescription);
+      QRCode.toCanvas(qrCanvas, offerStr, error => {
+        if (error) {
+          console.error("QR Code error", error);
+          return;
+        }
+        qrCanvas.style.display = 'block';
+        qrcodeDiv.innerHTML = '';
+        qrcodeDiv.appendChild(qrCanvas);
+        log("Offer QR code displayed");
+      });
     }
 
     async function createAnswer() {
-      startScan((desc) => {
-        peer.setRemoteDescription(desc).then(async () => {
-          const answer = await peer.createAnswer();
-          await peer.setLocalDescription(answer);
+      log("Waiting to scan offer QR...");
+      startScan(async (desc) => {
+        log("Got offer from QR:", desc);
+        await peer.setRemoteDescription(desc);
+        const answer = await peer.createAnswer();
+        await peer.setLocalDescription(answer);
+
+        await waitForICEGatheringComplete(peer);
+        log("ICE gathering complete for answer");
+
+        const answerStr = JSON.stringify(peer.localDescription);
+        QRCode.toCanvas(qrCanvas, answerStr, error => {
+          if (error) {
+            console.error("QR Code error", error);
+            return;
+          }
+          qrCanvas.style.display = 'block';
+          qrcodeDiv.innerHTML = '';
+          qrcodeDiv.appendChild(qrCanvas);
+          log("Answer QR code displayed");
         });
       });
     }
@@ -73,16 +122,23 @@
             const imageData = qrCtx.getImageData(0, 0, qrCanvas.width, qrCanvas.height);
             const code = jsQR(imageData.data, qrCanvas.width, qrCanvas.height);
             if (code) {
+              log("QR code scanned:", code.data);
               stream.getTracks().forEach(track => track.stop());
               video.srcObject = null;
-              const desc = JSON.parse(code.data);
-              callback(desc);
+              try {
+                const desc = JSON.parse(code.data);
+                callback(desc);
+              } catch (e) {
+                console.error("Failed to parse QR code data", e);
+              }
               return;
             }
           }
           requestAnimationFrame(scan);
         };
         scan();
+      }).catch(err => {
+        console.error("Camera access error", err);
       });
     }
   </script>
